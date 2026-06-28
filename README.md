@@ -105,17 +105,9 @@ This project demonstrates practical implementation of:
 * Speech-to-Text
 * Prompt Engineering
 
-## Future Improvements
-
-* Ephemeral token authentication
-* Resume-based interview generation
-* Coding interview support
-* Multi-language interviews
-* Authentication and user management
-* Interview analytics dashboard
 
 ## Author
 
 **Shashank S**
 
-Computer Science Engineering Student with interests in Artificial Intelligence, Distributed Systems, Full-Stack Development, and Real-Time Communication.
+
