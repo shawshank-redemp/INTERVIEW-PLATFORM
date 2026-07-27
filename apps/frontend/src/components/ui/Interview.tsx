@@ -2,11 +2,11 @@ import BACKEND_URL from "@/lib/config";
 import axios from "axios";
 import { useEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router";
-import { Bot, Loader2, PhoneOff, User } from "lucide-react";
+import { AlertTriangle, Bot, Loader2, PhoneOff, User } from "lucide-react";
 import { Button } from "./button";
 import { VoiceOrb } from "./VoiceOrb";
 
-type Status = "connecting" | "live" | "ending";
+type Status = "connecting" | "live" | "ending" | "error";
 
 /** Attaches an analyser to a stream and returns a getter for its current 0..1 volume level. */
 function createLevelMeter(ctx: AudioContext, stream: MediaStream) {
@@ -35,6 +35,7 @@ export function Interview() {
     const navigate = useNavigate();
 
     const [status, setStatus] = useState<Status>("connecting");
+    const [errorMessage, setErrorMessage] = useState<string | null>(null);
     const [aiLevel, setAiLevel] = useState(0);
     const [userLevel, setUserLevel] = useState(0);
 
@@ -50,6 +51,7 @@ export function Interview() {
         let cancelled = false;
 
         (async () => {
+          try {
             const pc = new RTCPeerConnection();
             pcRef.current = pc;
 
@@ -77,10 +79,11 @@ export function Interview() {
             userMeter = createLevelMeter(audioCtx, ms);
 
             // Stream the mic to Deepgram for live transcription.
+            // TODO: mint short-lived per-session Deepgram keys server-side instead of
+            // exposing a long-lived key to the client.
             const socket = new WebSocket("wss://api.deepgram.com/v1/listen", [
                 "token",
-                //TODO: Lets create ephemereal api keys for the user and not put the prod key on the frontend
-                "VITE_DEEPGRAM_API_KEY",
+                process.env.BUN_PUBLIC_DEEPGRAM_API_KEY!,
             ]);
             socketRef.current = socket;
 
@@ -126,6 +129,19 @@ export function Interview() {
                 rafRef.current = requestAnimationFrame(tick);
             };
             rafRef.current = requestAnimationFrame(tick);
+          } catch (err) {
+            if (cancelled) return;
+            cleanup();
+            const deniedPermission =
+                err instanceof DOMException &&
+                (err.name === "NotAllowedError" || err.name === "PermissionDeniedError");
+            setErrorMessage(
+                deniedPermission
+                    ? "Microphone access was denied. Please allow microphone access in your browser and try again."
+                    : "We couldn't start the interview. Please check your connection and try again.",
+            );
+            setStatus("error");
+          }
         })();
 
         return () => {
@@ -170,18 +186,39 @@ export function Interview() {
                         <span
                             className={
                                 "relative inline-flex size-2.5 rounded-full " +
-                                (status === "live" ? "bg-emerald-400" : "bg-amber-400")
+                                (status === "live"
+                                    ? "bg-emerald-400"
+                                    : status === "error"
+                                      ? "bg-red-400"
+                                      : "bg-amber-400")
                             }
                         />
                     </span>
-                    {status === "connecting" ? "Connecting…" : status === "ending" ? "Wrapping up…" : "Interview live"}
+                    {status === "connecting"
+                        ? "Connecting…"
+                        : status === "ending"
+                          ? "Wrapping up…"
+                          : status === "error"
+                            ? "Connection issue"
+                            : "Interview live"}
                 </div>
                 <span className="text-sm text-muted-foreground">AI Interview</span>
             </header>
 
             {/* Stage */}
             <div className="flex flex-1 items-center justify-center px-6">
-                {status === "connecting" ? (
+                {status === "error" ? (
+                    <div className="flex max-w-sm flex-col items-center gap-4 text-center">
+                        <AlertTriangle className="size-7 text-red-400" />
+                        <p className="text-sm text-muted-foreground">{errorMessage}</p>
+                        <div className="flex gap-3">
+                            <Button variant="outline" onClick={() => navigate("/")}>
+                                Back to home
+                            </Button>
+                            <Button onClick={() => window.location.reload()}>Try again</Button>
+                        </div>
+                    </div>
+                ) : status === "connecting" ? (
                     <div className="flex flex-col items-center gap-3 text-muted-foreground">
                         <Loader2 className="size-7 animate-spin" />
                         <p className="text-sm">Setting up your interview & microphone…</p>
@@ -209,22 +246,24 @@ export function Interview() {
             </div>
 
             {/* Controls */}
-            <footer className="flex justify-center px-6 py-8">
-                <Button
-                    variant="destructive"
-                    size="lg"
-                    onClick={endInterview}
-                    disabled={status === "ending"}
-                    className="gap-2 rounded-full px-6"
-                >
-                    {status === "ending" ? (
-                        <Loader2 className="size-4 animate-spin" />
-                    ) : (
-                        <PhoneOff className="size-4" />
-                    )}
-                    End interview
-                </Button>
-            </footer>
+            {status !== "error" && (
+                <footer className="flex justify-center px-6 py-8">
+                    <Button
+                        variant="destructive"
+                        size="lg"
+                        onClick={endInterview}
+                        disabled={status === "ending"}
+                        className="gap-2 rounded-full px-6"
+                    >
+                        {status === "ending" ? (
+                            <Loader2 className="size-4 animate-spin" />
+                        ) : (
+                            <PhoneOff className="size-4" />
+                        )}
+                        End interview
+                    </Button>
+                </footer>
+            )}
         </main>
     );
 }

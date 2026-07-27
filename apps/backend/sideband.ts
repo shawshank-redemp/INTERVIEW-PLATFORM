@@ -1,6 +1,43 @@
 import WebSocket from "ws";
 import { prisma } from "./db";
 
+type ScrapedRepo = {
+    name: string;
+    description: string | null;
+    fullName: string;
+    starCount: number;
+};
+
+// The scraper stores githubMetadata as a JSON-encoded string (double-serialized
+// via JSON.stringify before being saved to the Json column) — parse it back out.
+function parseGithubMetadata(raw: unknown): ScrapedRepo[] {
+    try {
+        const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+        return Array.isArray(parsed) ? parsed : [];
+    } catch {
+        return [];
+    }
+}
+
+// Turns the candidate's scraped repos into a compact, prompt-ready summary.
+// This is what actually makes the interview "personalized from your GitHub" —
+// without it the model has no idea what the candidate has built.
+function formatGithubProfileForPrompt(raw: unknown): string {
+    const repos = parseGithubMetadata(raw);
+
+    if (repos.length === 0) {
+        return "No public repositories were found for this candidate. Do not reference or invent specific projects — instead focus questions on general computer science and software engineering fundamentals.";
+    }
+
+    const top = [...repos]
+        .sort((a, b) => (b.starCount ?? 0) - (a.starCount ?? 0))
+        .slice(0, 8)
+        .map((r) => `- ${r.fullName}${r.description ? `: ${r.description}` : " (no description provided)"} [${r.starCount ?? 0} stars]`)
+        .join("\n");
+
+    return `The candidate's public GitHub repositories (most starred first):\n${top}\n\nGround your project-related questions in these repositories specifically. Never invent repositories, technologies, or details not listed here.`;
+}
+
 export async function initSideband(callId: string, interviewId: string) {
     const url = "wss://api.openai.com/v1/realtime?call_id=" + callId;
     const ws = new WebSocket(url, {
@@ -15,6 +52,8 @@ export async function initSideband(callId: string, interviewId: string) {
         }
     })
 
+    const githubProfileSummary = formatGithubProfileForPrompt(interview?.githubMetadata);
+
     ws.on("open", function open() {
         console.log("Connected to server.");
      console.log("Sending session.update");
@@ -26,6 +65,9 @@ export async function initSideband(callId: string, interviewId: string) {
                     type: "realtime",
                    instructions: `
                             You are an experienced Senior Software Engineer conducting a live technical interview.
+
+CANDIDATE GITHUB PROFILE:
+${githubProfileSummary}
 
 ROLE : You are an interviewer, not a tutor, mentor, teacher, or assistant. Your job is to evaluate the candidate's technical knowledge, reasoning, problem-solving ability, project ownership, debugging skills, communication, and design thinking. Remain professional, concise, objective, and in interviewer mode until the interview ends.
 

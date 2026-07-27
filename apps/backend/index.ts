@@ -1,16 +1,29 @@
 import express from "express";
 import { PreInterviewBody } from "./types";
-import { scrapeGitHub } from "./scraper/github";
+import { scrapeGitHub, GithubProfileNotFoundError } from "./scraper/github";
 import cors from "cors";
 import { prisma } from "./db";
 import { initSideband } from "./sideband";
-import { calculateResult } from "./result";
+import { calculateResult, hasSufficientInterviewData } from "./result";
 
 const app = express();
 
 app.use(express.json());
 app.use(cors());
 app.use(express.text({ type: ["application/sdp", "text/plain"] }));
+
+// Extracts the profile username from a GitHub URL, taking only the first path
+// segment so repo URLs (github.com/user/repo) resolve to the owner, not the repo.
+function extractGithubUsername(input: string): string | null {
+  try {
+    const url = new URL(input.match(/^https?:\/\//) ? input : `https://${input}`);
+    if (!/(^|\.)github\.com$/i.test(url.hostname)) return null;
+    const [username] = url.pathname.split("/").filter(Boolean);
+    return username || null;
+  } catch {
+    return null;
+  }
+}
 
 // ================= PRE INTERVIEW =================
 
@@ -24,11 +37,13 @@ app.post("/api/v1/pre-interview", async (req, res) => {
       });
     }
 
-    const githubUrl = data.github.endsWith("/")
-      ? data.github.slice(0, -1)
-      : data.github;
+    const githubUsername = extractGithubUsername(data.github);
 
-    const githubUsername = githubUrl.split("/").pop()!;
+    if (!githubUsername) {
+      return res.status(400).json({
+        message: "Please provide a valid GitHub profile URL, e.g. https://github.com/username",
+      });
+    }
 
     console.log("================================");
     console.log("GitHub Username:", githubUsername);
@@ -53,6 +68,12 @@ app.post("/api/v1/pre-interview", async (req, res) => {
   } catch (err) {
     console.error("========== PRE-INTERVIEW ERROR ==========");
     console.error(err);
+
+    if (err instanceof GithubProfileNotFoundError) {
+      return res.status(404).json({
+        message: "We couldn't find that GitHub profile. Please check the username and try again.",
+      });
+    }
 
     res.status(500).json({
       message: "Internal Server Error",
@@ -161,31 +182,57 @@ app.get("/api/v1/result/:interviewId", async (req, res) => {
     });
   }
 
+  const transcript = interview.conversations.map((c: any) => ({
+    type: c.type,
+    content: c.message,
+    createdAt: c.createdAt,
+  }));
+
+  // Already resolved — either evaluated, or previously flagged as incomplete below.
+  if (interview.status === "Done") {
+    return res.json({
+      score: interview.score,
+      feedback: interview.feedback,
+      transcript,
+      status: interview.feedback ? "Done" : "Incomplete",
+    });
+  }
+
+  // Guard: never ask the model to evaluate an interview that never really happened
+  // (e.g. the candidate said "Hi" and left) — it will fabricate plausible-sounding feedback.
+  if (!hasSufficientInterviewData(interview.conversations)) {
+    await prisma.interview.update({
+      where: { id: req.params.interviewId },
+      data: { status: "Done", feedback: null, score: 0 },
+    });
+
+    return res.json({
+      score: 0,
+      feedback: null,
+      transcript,
+      status: "Incomplete",
+    });
+  }
+
   res.json({
     score: interview.score,
     feedback: interview.feedback,
-    transcript: interview.conversations.map((c:any) => ({
-      type: c.type,
-      content: c.message,
-      createdAt: c.createdAt,
-    })),
+    transcript,
     status: interview.status,
   });
 
-  if (interview.status !== "Done") {
-    const result = await calculateResult(interview.conversations);
+  const result = await calculateResult(interview.conversations);
 
-    await prisma.interview.update({
-      where: {
-        id: req.params.interviewId,
-      },
-      data: {
-        status: "Done",
-        feedback: result.feedback,
-        score: result.score,
-      },
-    });
-  }
+  await prisma.interview.update({
+    where: {
+      id: req.params.interviewId,
+    },
+    data: {
+      status: "Done",
+      feedback: result.feedback,
+      score: result.score,
+    },
+  });
 });
 
 // ================= START SERVER =================
